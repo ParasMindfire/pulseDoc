@@ -1,0 +1,16 @@
+{
+  "name": "clinicworks-function",
+  "version": "1.0.0",
+  "main": "index.js",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "scripts": {
+    "start": "func start"
+  },
+  "dependencies": {
+    "@azure/functions": "^4.5.0",
+    "@google/genai": "^0.14.0",
+    "pg": "^8.11.5"
+  }
+}

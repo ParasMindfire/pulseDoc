@@ -1,0 +1,13 @@
+{
+  "IsEncrypted": false,
+  "Values": {
+    "AzureWebJobsStorage": "UseDevelopmentStorage=true",
+    "FUNCTIONS_WORKER_RUNTIME": "node",
+    "GEMINI_API_KEY": "your-gemini-api-key",
+    "DB_HOST": "your-postgres-container-fqdn",
+    "DB_NAME": "clinicworks",
+    "DB_USER": "clinicadmin",
+    "DB_PASSWORD": "your-password",
+    "DB_PORT": "5432"
+  }
+}

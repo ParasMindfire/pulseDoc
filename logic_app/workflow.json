@@ -1,0 +1,43 @@
+{
+  "definition": {
+    "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+    "contentVersion": "1.0.0.0",
+    "parameters": {},
+    "triggers": {
+      "manual": {
+        "type": "Request",
+        "kind": "Http",
+        "inputs": {
+          "schema": {
+            "type": "object",
+            "properties": {
+              "file_base64": { "type": "string" },
+              "processed_by": { "type": "string" },
+              "document_id": { "type": "integer" }
+            }
+          }
+        }
+      }
+    },
+    "actions": {
+      "Call_Function": {
+        "type": "Http",
+        "inputs": {
+          "method": "POST",
+          "uri": "PASTE_YOUR_FUNCTION_URL_HERE_INCLUDING_?code=XXXX",
+          "headers": { "Content-Type": "application/json" },
+          "body": "@triggerBody()"
+        }
+      },
+      "Response": {
+        "type": "Response",
+        "runAfter": { "Call_Function": ["Succeeded", "Failed"] },
+        "inputs": {
+          "statusCode": 200,
+          "body": "@body('Call_Function')"
+        }
+      }
+    },
+    "outputs": {}
+  }
+}
