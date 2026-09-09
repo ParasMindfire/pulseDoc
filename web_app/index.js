@@ -14,7 +14,7 @@ const LOGIC_APP_URL = process.env.LOGIC_APP_URL;
 function getPool() {
   return new Pool({
     host: process.env.DB_HOST,
-    database: process.env.DB_NAME || 'clinicworks',
+    database: process.env.DB_NAME || 'pulsedoc',
     user: process.env.DB_USER,
     password: process.env.DB_PASSWORD,
     port: parseInt(process.env.DB_PORT || '5432', 10),
@@ -51,7 +51,8 @@ app.get('/api/documents', async (req, res) => {
   try {
     const result = await pool.query(
       `SELECT document_id, document_type, measure_extracted, measure_date,
-              date_processed, processed_by, processing_status, confidence_score
+              date_processed, processed_by, processing_status, confidence_score,
+              error_message, confidence_breakdown, audit_trail, raw_extraction
        FROM processed_documents ORDER BY document_id DESC`
     );
     res.json(result.rows);
@@ -100,4 +101,4 @@ app.get('*', (req, res) => {
 });
 
 const PORT = process.env.PORT || 8000;
-app.listen(PORT, () => console.log(`ClinicWorks server running on port ${PORT}`));
+app.listen(PORT, () => console.log(`PulseDoc server running on port ${PORT}`));
