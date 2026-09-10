@@ -422,6 +422,30 @@ Once those six secrets exist, `infra-deploy.yml` can log in and run. Until
 then it will fail on the `azure/login` step with an authentication error —
 that's expected, not a bug in the workflow.
 
+### InvalidResourceLocation on `actionGroup`, first real `deploy` run of the monitoring resources (2026-09-10)
+
+Deploy failed on `ag-pulsedoc-dev-alerts` with:
+```
+The resource 'ag-pulsedoc-dev-alerts' already exists in location 'centralindia'
+in resource group 'rg-pulsedoc-dev-cin'. A resource with the same name cannot
+be created in location 'global'.
+```
+Cause: the action group was created manually in the Portal first (this
+project's usual pattern — verify in the Portal, then encode into Bicep), and
+the Portal's wizard put it in `centralindia` instead of the `global` this
+file originally declared. Location is immutable on an existing Azure
+resource — a redeploy can't move it, only match it or force a recreate under
+a different name. Fix: changed `actionGroup`'s `location` from the
+hardcoded `'global'` to the `location` param (`centralindia`), matching what
+was actually live.
+
+**If this happens again on another resource** (`webApp5xxAlert`,
+`functionApp5xxAlert`, `logicAppRunsFailedAlert`, or `webAvailabilityAlert` —
+all currently declared `location: 'global'`, all also possibly created
+manually first): same fix, same reasoning — check the live resource's actual
+`location` (Portal → the resource → Overview, or `az resource show --query
+location`) and match it in `main.bicep` rather than fighting it.
+
 ### RoleAssignmentExists on first real `deploy` run
 
 The `funcKvRole`/`webKvRole` resources (granting "Key Vault Secrets User" to

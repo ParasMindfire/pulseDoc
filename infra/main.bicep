@@ -341,7 +341,14 @@ resource logicApp 'Microsoft.Logic/workflows@2019-05-01' = {
 // or an smsReceivers array here — no need to touch the alerts themselves.
 resource actionGroup 'Microsoft.Insights/actionGroups@2023-01-01' = {
   name: 'ag-${appName}-${env}-alerts'
-  location: 'global'                          // action groups are always global, not regional
+  // Action groups are usually created as 'global', but the real one (made
+  // manually in the Portal first, per this project's usual workflow) ended
+  // up with location = 'centralindia' instead — confirmed via a real deploy
+  // failure (InvalidResourceLocation) on 2026-09-10. Location is immutable
+  // on an existing resource, so this matches what's actually live instead
+  // of fighting it.
+  location: location
+
   properties: {
     groupShortName: 'pdalerts'                // max 12 chars, shows in the alert email subject
     enabled: true
