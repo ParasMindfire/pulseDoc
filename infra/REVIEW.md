@@ -341,6 +341,19 @@ Once those six secrets exist, `infra-deploy.yml` can log in and run. Until
 then it will fail on the `azure/login` step with an authentication error —
 that's expected, not a bug in the workflow.
 
+### RoleAssignmentExists on first real `deploy` run
+
+The `funcKvRole`/`webKvRole` resources (granting "Key Vault Secrets User" to
+each app's managed identity) failed on the actual `deploy` — not `what-if` —
+with `RoleAssignmentExists`, pointing at two role assignment IDs that didn't
+match the ones Bicep computed. Cause: both permissions were already granted
+manually, back in README Parts 4-5. Azure enforces uniqueness on
+`(principalId, roleDefinitionId, scope)`, not on the assignment's own
+name/GUID — so a `guid(...)`-derived deterministic name doesn't help here,
+it's still a duplicate grant of the same permission under the hood. Fix:
+removed both resources from `main.bicep` entirely rather than fight it —
+the permission already exists and works, there's nothing to adopt or manage.
+
 ### Secret-scanning incident, 2026-09-09 — why `functionAppUrl` is a param, not a file value
 
 Early on, the real Function URL+key got pasted directly into

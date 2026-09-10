@@ -90,11 +90,6 @@ var dbHost = 'psql-${appName}-${env}-${regionCode}.postgres.database.azure.com'
 // real `what-if` run — if yours differs, update this to match.
 var funcPlanName = 'ASP-rgpulsedocdevcin-b035'
 
-// Built-in Azure role definition IDs (these GUIDs are the same in every
-// subscription — they identify the ROLE, e.g. "Key Vault Secrets User",
-// not a specific assignment of it).
-var keyVaultSecretsUserRoleId = '4633458b-17de-408a-b874-0445c86b69e6'
-
 // -----------------------------------------------------------------------
 // EXISTING RESOURCE — a read-only reference to your Key Vault. The
 // `existing` keyword means "don't create this, just let me read its
@@ -233,24 +228,16 @@ resource functionApp 'Microsoft.Web/sites@2023-01-01' = {
   }
 }
 
-// Grants the Function App's own identity permission to READ Key Vault
-// secrets (data-plane access — separate from, and not implied by, any
-// Contributor/Owner role at the resource-group level). Same effect as
-// README Part 4's "Key Vault → IAM → Key Vault Secrets User → Function App".
-resource funcKvRole 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
-  // The name of a role assignment must be a GUID. guid(...) deterministically
-  // derives one from its inputs, so re-running this deploy always produces
-  // the SAME guid for the SAME (vault, app, role) combo — which is what
-  // makes this update-in-place instead of erroring on "already exists" or
-  // silently creating a duplicate assignment.
-  name: guid(kv.id, functionApp.id, keyVaultSecretsUserRoleId)
-  scope: kv
-  properties: {
-    principalId: functionApp.identity.principalId
-    principalType: 'ServicePrincipal'
-    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', keyVaultSecretsUserRoleId)
-  }
-}
+// NOTE on Key Vault access: both apps already have "Key Vault Secrets User"
+// granted to their managed identities — done manually per README Parts 4-5
+// ("Key Vault → IAM → Key Vault Secrets User → <app>"), confirmed still live
+// by a real deploy attempt here (Azure rejected this file's own attempt to
+// (re-)create those same two role assignments with `RoleAssignmentExists` —
+// Azure enforces uniqueness on the (principal, role, scope) triple itself,
+// not on the assignment's own name/GUID, so redeclaring an
+// already-granted permission is a conflict, not a safe no-op). Rather than
+// fight that, this file simply doesn't manage these two role assignments —
+// they're adopted implicitly by already existing and working.
 
 // -----------------------------------------------------------------------
 // WEB APP — Linux, Node 22, Free (F1) plan.
@@ -302,15 +289,8 @@ resource webApp 'Microsoft.Web/sites@2023-01-01' = {
   }
 }
 
-resource webKvRole 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
-  name: guid(kv.id, webApp.id, keyVaultSecretsUserRoleId)
-  scope: kv
-  properties: {
-    principalId: webApp.identity.principalId
-    principalType: 'ServicePrincipal'
-    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', keyVaultSecretsUserRoleId)
-  }
-}
+// (webApp's equivalent role assignment — see the note above funcKvRole's
+// old location: already granted manually, not managed here, same reason.)
 
 // -----------------------------------------------------------------------
 // LOGIC APP — Consumption. The workflow body is loaded straight from the
