@@ -26,6 +26,18 @@ function getPool() {
 app.use(express.json());
 
 // ---------------------------------------------------------------------------
+// Health check — deliberately does NOT touch Postgres. This is a liveness
+// probe for the Node process itself (used by App Service's Health check
+// feature, see infra/main.bicep's healthCheckPath); if it depended on the DB,
+// a slow/unreachable Postgres would make App Service think the whole app is
+// down and restart it, even though the process is fine. DB-specific problems
+// already surface through /api/documents failing and the 5xx metric alert.
+// ---------------------------------------------------------------------------
+app.get('/health', (req, res) => {
+  res.status(200).json({ status: 'ok' });
+});
+
+// ---------------------------------------------------------------------------
 // API routes
 // ---------------------------------------------------------------------------
 app.post('/api/upload', upload.single('document'), async (req, res) => {
