@@ -1,0 +1,62 @@
+# Deploys infra/main.bicep to the existing rg-pulsedoc-dev-cin resource group.
+#
+# This is a DIFFERENT identity than the other two workflows in this folder.
+# main_app-*.yml and main_func-*.yml each use an OIDC app registration that
+# Azure's Deployment Center auto-created, scoped ONLY to that one app — it
+# cannot write Key Vault secrets or create role assignments. This workflow
+# needs its own, broader (resource-group-scoped) identity. See infra/REVIEW.md
+# section "One-time setup" for the exact `az` commands to create it before
+# this workflow can run successfully — it will fail on `azure/login` until
+# that's done.
+name: Deploy infrastructure (Bicep)
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'infra/**'                # only run when infra actually changed, not on every React/Function commit
+  workflow_dispatch:               # lets you trigger it manually from the Actions tab, e.g. to re-run what-if
+env:
+  RESOURCE_GROUP: rg-pulsedoc-dev-cin
+  TEMPLATE_FILE: infra/main.bicep
+jobs:
+  what-if:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write              # required to request the OIDC JWT (no stored client secret)
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Login to Azure
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_INFRA_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_INFRA_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_INFRA_SUBSCRIPTION_ID }}
+      - name: What-if (preview only — no changes made)
+        run: |
+          az deployment group what-if \
+            --resource-group ${{ env.RESOURCE_GROUP }} \
+            --template-file ${{ env.TEMPLATE_FILE }} \
+            --parameters dbAdminPassword='${{ secrets.DB_ADMIN_PASSWORD }}' geminiApiKey='${{ secrets.GEMINI_API_KEY }}' functionAppUrl='${{ secrets.FUNCTION_APP_URL }}'
+  deploy:
+    runs-on: ubuntu-latest
+    needs: what-if                 # deploy only runs if the what-if step above succeeded
+    environment: production        # optional: lets you require a manual approval in repo Settings -> Environments before this job runs
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Login to Azure
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_INFRA_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_INFRA_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_INFRA_SUBSCRIPTION_ID }}
+      - name: Deploy
+        run: |
+          az deployment group create \
+            --resource-group ${{ env.RESOURCE_GROUP }} \
+            --template-file ${{ env.TEMPLATE_FILE }} \
+            --parameters dbAdminPassword='${{ secrets.DB_ADMIN_PASSWORD }}' geminiApiKey='${{ secrets.GEMINI_API_KEY }}' functionAppUrl='${{ secrets.FUNCTION_APP_URL }}'
