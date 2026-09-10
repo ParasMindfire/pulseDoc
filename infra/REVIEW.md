@@ -67,11 +67,14 @@ which this file does not do). Every `az deployment group ...` command below
 implicitly targets whatever `--resource-group` you pass on the command line.
 
 ### `param` block
-Four inputs. `env`, `regionCode`, `location` have defaults — you'll basically
-never override them. `dbAdminPassword` and `geminiApiKey` are `@secure()`
-**with no default**, on purpose: Bicep will refuse to deploy without them
-being explicitly supplied, so there's no way to accidentally deploy with an
-empty secret.
+Five inputs. `env`, `regionCode`, `location`, `alertEmail` have defaults —
+you'll basically never override them. `dbAdminPassword` and `geminiApiKey`
+are `@secure()` **with no default**, on purpose: Bicep will refuse to deploy
+without them being explicitly supplied, so there's no way to accidentally
+deploy with an empty secret. `alertEmail` is intentionally plain (not
+`@secure()`) — it's a destination address, not a credential — and defaults to
+`parascet2025@gmail.com`; override via `--parameters alertEmail=...` if you
+ever want monitoring alerts to go somewhere else.
 
 ### `var` block
 Builds every resource name from your naming table (`README_PULSEDOC.md`) via
@@ -139,12 +142,82 @@ Same shapes as the Function App's three blocks, adapted for Linux (`kind:
 `appCommandLine: 'npm start'` standing in for README Part 5's runtime-stack
 dropdown and startup command field. `LOGIC_APP_URL` is absent from its
 appSettings for the same chicken/egg reason as the Key Vault secret above.
+`siteConfig.healthCheckPath: '/health'`, added 2026-09-10, points at the new
+route in `web_app/index.js` (deliberately DB-free — see that file's comment)
+and enables App Service's built-in liveness probe. **Not** set on the
+Function App: Health check is not supported on Consumption (Y1/Dynamic)
+plans, only Basic tier and above.
 
 ### `logicApp`
 `definition: loadJsonContent('../logic_app/workflow.json').definition` reads
 your actual, real `logic_app/workflow.json` off disk at deploy time — so the
 workflow logic has exactly one home in the repo. This file does not duplicate
 or re-describe your Logic App's steps in Bicep syntax.
+
+### `actionGroup`, `webAvailabilityTest`, `webApp5xxAlert`, `functionApp5xxAlert`
+"Essentials" monitoring, added 2026-09-10. All four are **brand-new**
+resources (nothing here adopts or reads an existing resource, unlike the Key
+Vault / App Insights blocks above), so there's no name-collision risk the way
+there is elsewhere in this file — worst case a re-run just updates these same
+four resources in place.
+- `actionGroup` — one email receiver (`alertEmail` param), reused as the
+  `actions` target on both metric alerts below. `location: 'global'` is
+  required for action groups, not a typo.
+- `webAvailabilityTest` — a `kind: 'standard'` availability test (updated
+  2026-09-10 from the original `kind: 'ping'` — Azure retired portal creation
+  of "classic" ping tests, `+ Create standard test` is what the portal
+  actually offers now, and its underlying resource shape is different:
+  `Request`/`ValidationRules` objects instead of a `Configuration.WebTest`
+  XML blob) that hits `https://${webApp.properties.defaultHostName}/health`
+  and expects a 200 within 30s. The `hidden-link:` tag is what makes its
+  results show up inside the Web App's own Application Insights component in
+  the Portal instead of as an orphaned resource. Note: this checks the **Web
+  App only** — the Function App is triggered by the Logic App, not polled
+  directly, so a ping test doesn't make sense for it the same way. Also
+  note: this resource lives in the **Application Insights** blade (left nav
+  → Investigate → Availability), not the Web App's own "Monitoring"
+  section — they're two different resources that happen to share the same
+  display name.
+  **Cost, confirmed real 2026-09-10**: Standard tests are billed per
+  execution (shows as "Standard Web Test Execution" in Cost Analysis, group
+  by Meter) — this is NOT free like classic ping tests were. Confirmed on an
+  unrelated project's real bill where this exact meter was ~98% of that
+  resource group's entire spend. Tuned down from the original 300s/5-min
+  frequency + 2 locations to **900s (15 min) + 1 location** — roughly 6x
+  fewer executions, still catches an outage within 15 minutes, appropriate
+  for a dev app. Trade-off: with 1 location there's no second region to
+  cross-check a transient blip against before alerting (see
+  `webAvailabilityAlert`'s `failedLocationCount` below). If cost is still a
+  concern after deploying, check Cost Analysis → Meter →
+  "Standard Web Test Execution" for this resource group specifically before
+  tuning further.
+
+### `webAvailabilityAlert`
+Added 2026-09-10 — the webtest above only *runs* the check, it doesn't
+notify anyone by itself. Availability alerting uses a different criteria
+type than the plain metric alerts elsewhere in this file
+(`Microsoft.Azure.Monitor.WebtestLocationAvailabilityCriteria`), and its
+`scopes` array has to list **both** the webtest and the Application Insights
+component together — that's also why the Portal's "Create standard test"
+wizard doesn't prompt for an action group anymore; that step is now this
+separate alert rule. `failedLocationCount: 1` (dropped from an original `2`
+on 2026-09-10, matching the test's move to 1 location for cost reasons — see
+`webAvailabilityTest` above) — bump back to `2` if a second test location is
+ever added back, to restore the "both must fail" false-positive guard.
+- `webApp5xxAlert` / `functionApp5xxAlert` — fire when either site returns 1+
+  HTTP 5xx response in a 5-minute window (`Http5xx` metric on
+  `Microsoft.Web/sites`, `GreaterThan 0`, severity 2/Warning). Both email
+  `actionGroup`.
+
+### `logicAppRunsFailedAlert`
+Added 2026-09-10, same pattern as the two `Http5xx` alerts but scoped to the
+Logic App and using its `RunsFailed` metric (`Microsoft.Logic/workflows`
+namespace) instead — Logic Apps don't emit an HTTP-status-code metric the way
+App Service resources do, `RunsFailed` is the equivalent "something actually
+went wrong" signal. Window is `PT15M` instead of `PT5M`: this workflow only
+runs on-demand (triggered by a document upload), not on a schedule, so a
+wider window doesn't risk missing anything and avoids the alert flapping
+around idle gaps between uploads.
 
 ### `output` block
 Values printed at the end of a successful deploy (and visible in the GitHub
@@ -242,6 +315,14 @@ Consumption Function Apps, for example), **add those into the corresponding
 will remove them and can break the app. When in doubt, deploy `what-if` only,
 read the `Modify` diff on these two resources line-by-line, and don't run the
 real `deploy` job until you're sure nothing important is disappearing.
+
+### G0. `healthCheckPath` requires the code to already be live
+`main.bicep` setting `healthCheckPath: '/health'` doesn't create that route —
+it just tells App Service to start pinging a path that must already return
+200. If the Web App's deployed code doesn't have the `/health` route yet
+(added to `web_app/index.js` on 2026-09-10), App Service will mark the app
+unhealthy immediately after this deploys. Push/deploy the code change to the
+Web App **before or in the same batch as** this Bicep change, never after.
 
 ### G. Always run `what-if` first, and actually read it
 Both locally and in CI (the `what-if` job runs automatically before `deploy`

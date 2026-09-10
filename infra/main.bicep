@@ -66,6 +66,9 @@ param geminiApiKey string
 @description('The real Function App URL, including the ?code= key, that the Logic App calls. Rotated after the secret-scanning incident on 2026-09-09 — never commit this value into logic_app/workflow.json again, it belongs here and in the FUNCTION_APP_URL GitHub secret only.')
 param functionAppUrl string
 
+@description('Email address that receives monitoring alerts (downtime, 5xx errors). Not secret, just a plain param — override via --parameters if you ever want a different inbox.')
+param alertEmail string = 'parascet2025@gmail.com'
+
 // -----------------------------------------------------------------------
 // VARIABLES — computed names, built from the params above using the exact
 // pattern from your naming table in README_PULSEDOC.md, so nothing here is
@@ -265,6 +268,12 @@ resource webApp 'Microsoft.Web/sites@2023-01-01' = {
     siteConfig: {
       linuxFxVersion: 'NODE|22-lts'           // the Linux-stack equivalent of README Part 5's "Runtime stack: Node 22 LTS"
       appCommandLine: 'npm start'             // README Part 5's "Startup Command"
+      // App Service pings this path every ~1 min and marks the instance
+      // unhealthy after repeated failures — see the /health route added to
+      // web_app/index.js, which deliberately skips the DB so a slow Postgres
+      // doesn't get misread as "the whole app is down." Not supported on
+      // Consumption-plan Function Apps, so this only applies here.
+      healthCheckPath: '/health'
       appSettings: [
         { name: 'SCM_DO_BUILD_DURING_DEPLOYMENT', value: 'true' }
         { name: 'APPINSIGHTS_INSTRUMENTATIONKEY', value: webAppInsights.properties.InstrumentationKey }
@@ -320,6 +329,229 @@ resource logicApp 'Microsoft.Logic/workflows@2019-05-01' = {
 }
 
 // -----------------------------------------------------------------------
+// MONITORING — "essentials" tier: get emailed when the site is down or
+// either app starts throwing server errors. Deliberately NOT a Log
+// Analytics workspace / Workbook — that's a recurring cost this dev
+// environment doesn't need; everything below reads off metrics the
+// platform + existing App Insights components already emit for free.
+// -----------------------------------------------------------------------
+
+// One action group, reused by every alert below. To add a second
+// recipient (e.g. a teammate, or SMS), add another entry to emailReceivers
+// or an smsReceivers array here — no need to touch the alerts themselves.
+resource actionGroup 'Microsoft.Insights/actionGroups@2023-01-01' = {
+  name: 'ag-${appName}-${env}-alerts'
+  location: 'global'                          // action groups are always global, not regional
+  properties: {
+    groupShortName: 'pdalerts'                // max 12 chars, shows in the alert email subject
+    enabled: true
+    emailReceivers: [
+      {
+        name: 'primary-email'
+        emailAddress: alertEmail
+        useCommonAlertSchema: true
+      }
+    ]
+  }
+}
+
+// Availability (ping) test — hits the Web App's real public URL every 5
+// minutes from 2 Azure regions and fires if it doesn't get a 200 back
+// within 30s. This is the one check that catches "site is completely
+// unreachable," which the Http5xx alert below can't — a dead site
+// returns nothing, not a 5xx.
+// `kind: 'standard'` (top-level resource property, not inside `properties`)
+// — Azure retired portal creation of the old "classic" ping test (the
+// `Kind: 'ping'` + XML `Configuration.WebTest` shape); the portal's
+// "+ Create standard test" button now creates this shape instead. Matching
+// it here means clicking through that button first, then running this file,
+// updates the same resource instead of leaving two different tests behind.
+resource webAvailabilityTest 'Microsoft.Insights/webtests@2022-06-15' = {
+  name: 'webtest-${webName}-availability'
+  location: location
+  tags: {
+    // this hidden-link tag is what makes the Portal show the test's
+    // results inside the Web App's own Application Insights component
+    // instead of as an orphaned resource
+    'hidden-link:${webAppInsights.id}': 'Resource'
+  }
+  kind: 'standard'
+  properties: {
+    SyntheticMonitorId: 'webtest-${webName}-availability'
+    Name: 'PulseDoc Web App availability'
+    Enabled: true
+    // 900s (15 min), 1 location — NOT the original 300s/2-location config.
+    // Standard tests are billed per execution ("Standard Web Test Execution"
+    // in Cost Analysis), confirmed 2026-09-10 by a real bill on an unrelated
+    // project where this exact meter was ~98% of that resource group's
+    // spend. 15 min instead of 5 min = 1/3 the executions; 1 location
+    // instead of 2 = half again — roughly 6x cheaper than the original
+    // config, appropriate for a dev app where "found out within 15 min"
+    // is plenty. Trade-off: with only 1 location, a single region's
+    // transient network blip can't be cross-checked against a second one
+    // before alerting (see failedLocationCount below) — acceptable here,
+    // reconsider if this ever needs production-grade reliability.
+    Frequency: 900
+    Timeout: 30
+    Kind: 'standard'
+    RetryEnabled: true
+    Locations: [
+      { Id: 'apac-sg-sin-azr' }                // Southeast Asia — closest public test region to Central India
+    ]
+    Request: {
+      RequestUrl: 'https://${webApp.properties.defaultHostName}/health'
+      HttpVerb: 'GET'
+      ParseDependentRequests: false
+      FollowRedirects: true
+    }
+    ValidationRules: {
+      ExpectedHttpStatusCode: 200
+      SSLCheck: false
+    }
+  }
+}
+
+// The webtest above only RUNS the check — on its own it notifies nobody.
+// Availability alerts use a dedicated criteria type that has to reference
+// BOTH the webtest and the Application Insights component together (not
+// just a plain metric on one resource, unlike the Http5xx/RunsFailed alerts
+// below), which is also why the Portal's "Create standard test" wizard
+// doesn't ask for an action group anymore — that step moved to its own
+// alert rule, created here.
+// failedLocationCount: 1 — matches the single test location above (can't
+// require 2-out-of-2 when there's only 1 configured). If you later add a
+// second location back, bump this to 2 to restore the "both must fail"
+// false-positive guard.
+resource webAvailabilityAlert 'Microsoft.Insights/metricAlerts@2018-03-01' = {
+  name: 'alert-${webAvailabilityTest.name}'
+  location: 'global'
+  properties: {
+    description: 'Web App (${webName}) availability test failed in the last 15 minutes.'
+    severity: 1
+    enabled: true
+    scopes: [
+      webAvailabilityTest.id
+      webAppInsights.id
+    ]
+    evaluationFrequency: 'PT5M'
+    windowSize: 'PT15M'
+    criteria: {
+      'odata.type': 'Microsoft.Azure.Monitor.WebtestLocationAvailabilityCriteria'
+      webTestId: webAvailabilityTest.id
+      componentId: webAppInsights.id
+      failedLocationCount: 1
+    }
+    actions: [
+      { actionGroupId: actionGroup.id }
+    ]
+  }
+}
+
+// Fires when the Web App returns 1+ HTTP 5xx response in a 5-minute
+// window. Severity 2 = Warning (not the most urgent tier, but still
+// emails immediately) — bump to 1 later if 5xx bursts turn out to matter
+// more than that.
+resource webApp5xxAlert 'Microsoft.Insights/metricAlerts@2018-03-01' = {
+  name: 'alert-${webName}-http5xx'
+  location: 'global'
+  properties: {
+    description: 'Web App (${webName}) returned one or more HTTP 5xx responses in the last 5 minutes.'
+    severity: 2
+    enabled: true
+    scopes: [ webApp.id ]
+    evaluationFrequency: 'PT5M'
+    windowSize: 'PT5M'
+    targetResourceType: 'Microsoft.Web/sites'
+    criteria: {
+      'odata.type': 'Microsoft.Azure.Monitor.SingleResourceMultipleMetricCriteria'
+      allOf: [
+        {
+          name: 'Http5xxErrors'
+          metricName: 'Http5xx'
+          metricNamespace: 'Microsoft.Web/sites'
+          operator: 'GreaterThan'
+          threshold: 0
+          timeAggregation: 'Total'
+          criterionType: 'StaticThresholdCriterion'
+        }
+      ]
+    }
+    actions: [
+      { actionGroupId: actionGroup.id }
+    ]
+  }
+}
+
+// Same idea, scoped to the Function App instead.
+resource functionApp5xxAlert 'Microsoft.Insights/metricAlerts@2018-03-01' = {
+  name: 'alert-${funcName}-http5xx'
+  location: 'global'
+  properties: {
+    description: 'Function App (${funcName}) returned one or more HTTP 5xx responses in the last 5 minutes.'
+    severity: 2
+    enabled: true
+    scopes: [ functionApp.id ]
+    evaluationFrequency: 'PT5M'
+    windowSize: 'PT5M'
+    targetResourceType: 'Microsoft.Web/sites'
+    criteria: {
+      'odata.type': 'Microsoft.Azure.Monitor.SingleResourceMultipleMetricCriteria'
+      allOf: [
+        {
+          name: 'Http5xxErrors'
+          metricName: 'Http5xx'
+          metricNamespace: 'Microsoft.Web/sites'
+          operator: 'GreaterThan'
+          threshold: 0
+          timeAggregation: 'Total'
+          criterionType: 'StaticThresholdCriterion'
+        }
+      ]
+    }
+    actions: [
+      { actionGroupId: actionGroup.id }
+    ]
+  }
+}
+
+// Fires when the Logic App has 1+ failed run in a 15-minute window. Window
+// is wider than the two Http5xx alerts above (5 min) on purpose — this
+// workflow only runs when someone uploads a document, not on a schedule, so
+// a 5-minute window could span long idle gaps and doesn't need to be that
+// tight; 15 minutes still means you hear about a failed upload well within
+// the same sitting.
+resource logicAppRunsFailedAlert 'Microsoft.Insights/metricAlerts@2018-03-01' = {
+  name: 'alert-${logicAppName}-runsfailed'
+  location: 'global'
+  properties: {
+    description: 'Logic App (${logicAppName}) had one or more failed runs in the last 15 minutes.'
+    severity: 2
+    enabled: true
+    scopes: [ logicApp.id ]
+    evaluationFrequency: 'PT15M'
+    windowSize: 'PT15M'
+    targetResourceType: 'Microsoft.Logic/workflows'
+    criteria: {
+      'odata.type': 'Microsoft.Azure.Monitor.SingleResourceMultipleMetricCriteria'
+      allOf: [
+        {
+          name: 'RunsFailed'
+          metricName: 'RunsFailed'
+          metricNamespace: 'Microsoft.Logic/workflows'
+          operator: 'GreaterThan'
+          threshold: 0
+          timeAggregation: 'Total'
+          criterionType: 'StaticThresholdCriterion'
+        }
+      ]
+    }
+    actions: [
+      { actionGroupId: actionGroup.id }
+    ]
+  }
+}
+
+// -----------------------------------------------------------------------
 // OUTPUTS — values printed after a successful deploy (and readable by a
 // later pipeline step). None of these are secret, so they're safe to
 // output in plain text (contrast with dbAdminPassword/geminiApiKey above,
@@ -331,3 +563,7 @@ output webAppName string = webApp.name
 output webAppHostName string = webApp.properties.defaultHostName
 output logicAppName string = logicApp.name
 output keyVaultUri string = kv.properties.vaultUri
+output actionGroupName string = actionGroup.name
+output webAvailabilityTestName string = webAvailabilityTest.name
+output webAvailabilityAlertName string = webAvailabilityAlert.name
+output logicAppRunsFailedAlertName string = logicAppRunsFailedAlert.name
